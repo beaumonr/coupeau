@@ -13,7 +13,7 @@ A small Android app that puts a dictation bubble on top of WhatsApp's green mic
 
 ## Install
 
-1. Download `dist/VoiceBubble-0.2.apk` on the phone and open it. Allow "install unknown apps" if asked.
+1. Download `dist/VoiceBubble-0.3.apk` on the phone and open it. Allow "install unknown apps" if asked.
 2. Open **Voice Bubble** and follow the checklist: accessibility on, microphone allowed.
    If accessibility is greyed out: App info → ⋮ → **Allow restricted settings**, then try again.
 

@@ -60,7 +60,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         // Android can reconnect the service; never leave an old bubble behind.
         live?.let { old -> if (old !== this) old.shutdownBubble() }
-        if (::bubble.isInitialized) detach()
+        if (::bubble.isInitialized) removeWindow()
         live = this
         // Positions saved by test build 0.1 could keep the bubble off the button; clear them once.
         val prefs = Prefs.get(this)
@@ -79,13 +79,16 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
+            windowAnimations = 0
             if (Build.VERSION.SDK_INT >= 28) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
         }
         applySize()
         bubble.setOnTouchListener(TouchHandler())
+        Prefs.get(this).unregisterOnSharedPreferenceChangeListener(this)
         Prefs.get(this).registerOnSharedPreferenceChangeListener(this)
+        ensureWindow()
         updateNotification()
     }
 
@@ -98,7 +101,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         handler.removeCallbacksAndMessages(null)
         if (::dictation.isInitialized && dictation.active) dictation.cancel()
         unmute()
-        if (::bubble.isInitialized) detach()
+        if (::bubble.isInitialized) removeWindow()
     }
 
     override fun onDestroy() {
@@ -106,7 +109,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         Prefs.get(this).unregisterOnSharedPreferenceChangeListener(this)
         if (::dictation.isInitialized) dictation.release()
         unmute()
-        detach()
+        if (::bubble.isInitialized) removeWindow()
         getSystemService(NotificationManager::class.java)?.cancel(NOTIF_ID)
         super.onDestroy()
     }
@@ -170,29 +173,66 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         }
     }
 
-    private fun attach() {
-        if (attached || bubble.isAttachedToWindow) {
-            attached = true
-            return
-        }
-        try {
+    /**
+     * The bubble lives in ONE window for the whole life of the service. Showing and hiding
+     * only changes visibility; the window is never removed and re-added, because repeated
+     * add/remove left "ghost" bubbles on screen on some phones.
+     */
+    private var windowAdded = false
+
+    private fun ensureWindow(): Boolean {
+        if (windowAdded) return true
+        return try {
+            hiddenFlags(true)
+            bubble.visibility = android.view.View.GONE
             wm.addView(bubble, params)
-            attached = true
+            windowAdded = true
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun hiddenFlags(hidden: Boolean) {
+        val f = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        params.flags = if (hidden) params.flags or f else params.flags and f.inv()
+    }
+
+    private fun attach() {
+        if (attached) return
+        if (!ensureWindow()) return
+        hiddenFlags(false)
+        bubble.visibility = android.view.View.VISIBLE
+        attached = true
+        try {
+            wm.updateViewLayout(bubble, params)
         } catch (_: Exception) {
         }
     }
 
     private fun detach() {
-        if (!attached) return
-        try {
-            wm.removeView(bubble)
-        } catch (_: Exception) {
-            try {
-                wm.removeViewImmediate(bubble)
-            } catch (_: Exception) {
-            }
+        if (!windowAdded) {
+            attached = false
+            return
         }
+        bubble.visibility = android.view.View.GONE
+        hiddenFlags(true)
         attached = false
+        try {
+            wm.updateViewLayout(bubble, params)
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Only when the service is shutting down. */
+    private fun removeWindow() {
+        attached = false
+        if (!windowAdded) return
+        try {
+            wm.removeViewImmediate(bubble)
+        } catch (_: Exception) {
+        }
+        windowAdded = false
     }
 
     // ---- placing the bubble ------------------------------------------------------------
