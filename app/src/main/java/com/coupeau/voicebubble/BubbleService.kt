@@ -153,6 +153,10 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         if (dictation.active) stopDictation(keepText = true)
         setMode(BubbleView.Mode.IDLE)
         if (hiddenForPkg != pkg) hiddenForPkg = null
+        if (pkg != currentPkg) {
+            parkedAt = null
+            bubble.parked = false
+        }
         currentPkg = pkg
         updateVisibility()
     }
@@ -274,12 +278,40 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
 
     private val watchdog = object : Runnable {
         override fun run() {
-            if (attached && !dragging) reposition()
+            if (attached && !dragging) {
+                reposition()
+                checkParkedSend()
+            }
             if (attached) handler.postDelayed(this, 600)
         }
     }
 
     private var dragging = false
+
+    /** Where the bubble was parked so you can type; null = sitting on the app's button. */
+    private var parkedAt: Pair<Int, Int>? = null
+    private var parkedSawText = false
+
+    private fun park(x: Int, y: Int) {
+        parkedAt = x to y
+        parkedSawText = false
+        bubble.parked = true
+    }
+
+    private fun unpark() {
+        if (parkedAt == null) return
+        parkedAt = null
+        bubble.parked = false
+        reposition()
+    }
+
+    /** While parked: once you've typed something and then sent it (box empty again), come back. */
+    private fun checkParkedSend() {
+        if (parkedAt == null || bubble.mode != BubbleView.Mode.IDLE) return
+        val hasText = currentFieldText().isNotBlank()
+        if (hasText) parkedSawText = true
+        else if (parkedSawText) unpark()
+    }
 
     private fun reposition() {
         if (!attached) return
@@ -287,7 +319,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         val size = sizePx()
         val (sw, sh) = screenSize()
 
-        val manual = Prefs.manualPos(this, pkg)
+        val manual = parkedAt ?: Prefs.manualPos(this, pkg)
         val target = if (manual == null && Prefs.snap(this)) targetCentre() else null
         val (x, y) = when {
             manual != null -> manual
@@ -463,6 +495,9 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
     // ---- the three taps ----------------------------------------------------------------
 
     private fun onTap() {
+        if (parkedAt != null && bubble.mode == BubbleView.Mode.IDLE) {
+            unpark()
+        }
         when (bubble.mode) {
             BubbleView.Mode.IDLE -> startDictation()
             BubbleView.Mode.LISTENING -> {
@@ -483,7 +518,8 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         }
     }
 
-    private fun onLongPress() {
+    /** Returns true if the bubble is now picked up and can be dragged. */
+    private fun onLongPress(): Boolean {
         buzz(60)
         when (bubble.mode) {
             BubbleView.Mode.LISTENING, BubbleView.Mode.READY_TO_SEND -> {
@@ -493,12 +529,12 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
                 setFieldText(baseText)
                 setMode(BubbleView.Mode.IDLE)
                 toast("Cancelled")
+                return false
             }
             BubbleView.Mode.IDLE -> {
-                // Snap back to the app's button if it was dragged somewhere else.
-                currentPkg?.let { Prefs.clearManualPos(this, it) }
-                reposition()
-                toast("Bubble back in its normal place")
+                bubble.pickedUp = true
+                dragging = true
+                return true
             }
         }
     }
@@ -632,39 +668,52 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         }
     }
 
-    /** Tap, long-press and drag on the bubble. */
+    /**
+     * Tap: talk / stop / send (or, if parked, come back and talk).
+     * Hold: cancel while talking; when idle, pick the bubble up so it can be dragged.
+     */
     private inner class TouchHandler : android.view.View.OnTouchListener {
-        private val slop = ViewConfiguration.get(this@BubbleService).scaledTouchSlop * 1.5f
+        private val slop = ViewConfiguration.get(this@BubbleService).scaledTouchSlop * 2f
         private var downX = 0f
         private var downY = 0f
         private var startX = 0
         private var startY = 0
-        private var dragging = false
+        private var pickedUp = false
+        private var moved = false
         private var longPressed = false
+        private var aborted = false
         private val longPress = Runnable {
             longPressed = true
-            onLongPress()
+            pickedUp = onLongPress()
         }
 
         private fun inHideZone(rawY: Float) = rawY > screenSize().second - dp(90f)
+
+        private fun endDrag() {
+            pickedUp = false
+            this@BubbleService.dragging = false
+            bubble.dropTarget = false
+            bubble.pickedUp = false
+        }
 
         override fun onTouch(v: android.view.View, e: MotionEvent): Boolean {
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
                     startX = params.x; startY = params.y
-                    dragging = false; longPressed = false
-                    handler.postDelayed(longPress, 550)
+                    pickedUp = false; moved = false; longPressed = false; aborted = false
+                    handler.postDelayed(longPress, 450)
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - downX
                     val dy = e.rawY - downY
-                    if (!dragging && !longPressed && hypot(dx, dy) > slop) {
-                        dragging = true
-                        this@BubbleService.dragging = true
+                    if (!longPressed && hypot(dx, dy) > slop) {
+                        // Finger slid before the hold registered: not a tap, not a drag.
                         handler.removeCallbacks(longPress)
+                        aborted = true
                     }
-                    if (dragging) {
+                    if (pickedUp) {
+                        if (hypot(dx, dy) > slop) moved = true
                         params.x = startX + dx.toInt()
                         params.y = startY + dy.toInt()
                         bubble.dropTarget = inHideZone(e.rawY)
@@ -676,39 +725,45 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(longPress)
-                    if (dragging) {
-                        bubble.dropTarget = false
+                    if (pickedUp) {
                         val pkg = currentPkg
-                        if (inHideZone(e.rawY)) {
+                        if (moved && inHideZone(e.rawY)) {
                             // "Store" it: hidden until you leave this app and come back.
                             hiddenForPkg = pkg
-                            if (dictation.active) stopDictation(keepText = true)
+                            parkedAt = null
+                            bubble.parked = false
                             setMode(BubbleView.Mode.IDLE)
                             detach()
                             params.x = startX; params.y = startY
                             toast("Bubble hidden. Leave and reopen the app to bring it back.")
-                        } else if (pkg != null) {
+                        } else if (moved && pkg != null) {
                             val size = sizePx()
                             val t = if (Prefs.snap(this@BubbleService)) targetCentre() else null
                             val cx = params.x + size / 2
                             val cy = params.y + size / 2
-                            if (t != null && hypot((cx - t.first).toFloat(), (cy - t.second).toFloat()) < dp(110f)) {
-                                // Dropped near the app's button: snap back on to it.
-                                Prefs.clearManualPos(this@BubbleService, pkg)
-                                reposition()
-                            } else {
-                                Prefs.setManualPos(this@BubbleService, pkg, params.x, params.y)
+                            when {
+                                // Dropped near the app's button: magnet back on to it.
+                                t != null && hypot((cx - t.first).toFloat(), (cy - t.second).toFloat()) < dp(110f) -> {
+                                    parkedAt = null
+                                    bubble.parked = false
+                                    Prefs.clearManualPos(this@BubbleService, pkg)
+                                }
+                                // There is a button to come back to: park here for now, so you can type.
+                                t != null -> park(params.x, params.y)
+                                // No button found in this app: remember this spot for next time.
+                                else -> Prefs.setManualPos(this@BubbleService, pkg, params.x, params.y)
                             }
                         }
-                        this@BubbleService.dragging = false
-                    } else if (!longPressed) {
+                        endDrag()
+                        reposition()
+                    } else if (!longPressed && !aborted) {
                         onTap()
                     }
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    this@BubbleService.dragging = false
                     handler.removeCallbacks(longPress)
-                    bubble.dropTarget = false
+                    endDrag()
+                    reposition()
                 }
             }
             return true

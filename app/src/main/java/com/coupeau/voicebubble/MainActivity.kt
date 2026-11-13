@@ -137,8 +137,10 @@ class MainActivity : Activity() {
             setOnCheckedChangeListener { _, on -> Prefs.setSnap(this@MainActivity, on) }
         }, lp())
         para(
-            "Drag the bubble to move it; it remembers the spot for that app. Long-press it (when idle) " +
-                "to snap it back. Drag it to the very bottom of the screen to hide it until you next open that app.",
+            "Want to type instead? Hold the bubble until it buzzes, then drag it out of the way. " +
+                "Tap it to bring it back and start talking; it also comes back by itself after you send. " +
+                "Drop it near the button to snap it back. Drop it at the very bottom of the screen to hide " +
+                "it until you next open that app.",
             small = true,
         )
         button("Reset all dragged positions") {
@@ -214,7 +216,8 @@ class MainActivity : Activity() {
             "🔵 Blue mic: tap to start talking. Your words appear in the message box as you speak.\n" +
                 "🔴 Red: listening. Pause to think as long as you like. Tap to stop.\n" +
                 "🟢 Green arrow: tap to send.\n" +
-                "Long-press while red or green: cancel, and the box goes back to how it was."
+                "Hold while red or green: cancel, and the box goes back to how it was.\n" +
+                "Hold while blue: pick it up and drag it out of the way to type."
         )
     }
 

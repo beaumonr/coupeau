@@ -11,8 +11,8 @@ android {
         applicationId = "com.coupeau.voicebubble"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 5
+        versionName = "0.5"
     }
 
     // A fixed key kept in the repo so each new test build installs over the old one.

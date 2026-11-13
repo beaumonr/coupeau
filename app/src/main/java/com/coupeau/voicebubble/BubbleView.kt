@@ -30,6 +30,31 @@ class BubbleView(context: Context) : View(context) {
             alpha = if (value) 0.35f else 1f
         }
 
+    /** Moved out of the way so you can type: drawn a little smaller. */
+    var parked = false
+        set(value) {
+            field = value
+            updateScale()
+        }
+
+    /** Held and ready to drag: drawn a little bigger. */
+    var pickedUp = false
+        set(value) {
+            field = value
+            updateScale()
+        }
+
+    private fun updateScale() {
+        val sc = when {
+            pickedUp -> 1.12f
+            parked -> 0.78f
+            else -> 1f
+        }
+        scaleX = sc
+        scaleY = sc
+        if (!dropTarget) alpha = if (parked && !pickedUp) 0.85f else 1f
+    }
+
     private var level = 0f
     private var pulsePhase = 0f
 
