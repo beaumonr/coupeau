@@ -37,6 +37,7 @@ class MainActivity : Activity() {
     private lateinit var notifStatus: TextView
     private lateinit var masterSwitch: Switch
     private lateinit var appsBox: LinearLayout
+    private lateinit var engineStatus: TextView
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -164,7 +165,36 @@ class MainActivity : Activity() {
             }
         }
 
-        heading("6. Other")
+        heading("6. Listening method")
+        para(
+            "Auto picks the smoothest one your phone supports. Continuous methods keep the mic " +
+                "open the whole time (Android 13+). If one fails, Auto moves on to the next.",
+            small = true,
+        )
+        val engines = listOf<Pair<String, Dictation.Engine?>>("Auto (recommended)" to null) +
+            Dictation.Engine.values().map { it.label to it }
+        val group = android.widget.RadioGroup(this)
+        val current = Prefs.engineOverride(this)
+        engines.forEachIndexed { i, (label, e) ->
+            group.addView(android.widget.RadioButton(this).apply {
+                id = 1000 + i
+                text = label
+                isChecked = e == current
+            })
+        }
+        group.setOnCheckedChangeListener { _, checkedId ->
+            Prefs.setEngineOverride(this, engines[checkedId - 1000].second)
+        }
+        root.addView(group, lp())
+        engineStatus = TextView(this).apply { textSize = 14f; alpha = 0.8f }
+        root.addView(engineStatus, lp(top = 6))
+        button("Re-test the continuous methods") {
+            Prefs.clearBrokenEngines(this)
+            refreshStatus()
+            Toast.makeText(this, "Auto will try the best method again next time", Toast.LENGTH_SHORT).show()
+        }
+
+        heading("7. Other")
         root.addView(CheckBox(this).apply {
             text = "Silence the beep when listening restarts (mutes media sound while you talk)"
             isChecked = Prefs.muteBeeps(this@MainActivity)
@@ -225,6 +255,9 @@ class MainActivity : Activity() {
             notifStatus.visibility = View.GONE
         }
         masterSwitch.isChecked = Prefs.enabled(this)
+        val last = Prefs.lastEngine(this)?.label ?: "not used yet"
+        val note = Prefs.brokenNote(this)
+        engineStatus.text = "Last used: $last" + if (note.isNotEmpty()) "\nSkipped: $note" else ""
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

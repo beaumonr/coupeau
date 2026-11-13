@@ -63,6 +63,42 @@ object Prefs {
     fun clearManualPos(ctx: Context, pkg: String) =
         get(ctx).edit().remove(POS_PREFIX + pkg + "_x").remove(POS_PREFIX + pkg + "_y").apply()
 
+    // ---- speech engine -------------------------------------------------------------
+
+    private const val KEY_ENGINE = "engine_override"
+    private const val KEY_BROKEN = "broken_engines"
+    private const val KEY_LAST_ENGINE = "last_engine"
+    private const val KEY_BROKEN_NOTE = "broken_note"
+
+    /** null = Auto (best that works). */
+    fun engineOverride(ctx: Context): Dictation.Engine? =
+        get(ctx).getString(KEY_ENGINE, null)?.let { n -> Dictation.Engine.values().firstOrNull { it.name == n } }
+
+    fun setEngineOverride(ctx: Context, e: Dictation.Engine?) =
+        get(ctx).edit().putString(KEY_ENGINE, e?.name).apply()
+
+    fun brokenEngines(ctx: Context): Set<Dictation.Engine> =
+        (get(ctx).getStringSet(KEY_BROKEN, null) ?: emptySet())
+            .mapNotNull { n -> Dictation.Engine.values().firstOrNull { it.name == n } }.toSet()
+
+    fun markEngineBroken(ctx: Context, e: Dictation.Engine, error: Int) {
+        val now = brokenEngines(ctx).map { it.name }.toMutableSet()
+        now.add(e.name)
+        val note = (get(ctx).getString(KEY_BROKEN_NOTE, "") ?: "") + "${e.label}: error $error. "
+        get(ctx).edit().putStringSet(KEY_BROKEN, now).putString(KEY_BROKEN_NOTE, note).apply()
+    }
+
+    fun brokenNote(ctx: Context) = get(ctx).getString(KEY_BROKEN_NOTE, "") ?: ""
+
+    fun clearBrokenEngines(ctx: Context) =
+        get(ctx).edit().remove(KEY_BROKEN).remove(KEY_BROKEN_NOTE).apply()
+
+    fun lastEngine(ctx: Context): Dictation.Engine? =
+        get(ctx).getString(KEY_LAST_ENGINE, null)?.let { n -> Dictation.Engine.values().firstOrNull { it.name == n } }
+
+    fun setLastEngine(ctx: Context, e: Dictation.Engine) =
+        get(ctx).edit().putString(KEY_LAST_ENGINE, e.name).apply()
+
     fun clearAllPositions(ctx: Context) {
         val p = get(ctx)
         val e = p.edit()
