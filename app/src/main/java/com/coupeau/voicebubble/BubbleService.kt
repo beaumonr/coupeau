@@ -26,7 +26,6 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
-import kotlin.math.abs
 import kotlin.math.hypot
 
 /**
@@ -59,6 +58,16 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
     override fun onServiceConnected() {
         super.onServiceConnected()
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        // Android can reconnect the service; never leave an old bubble behind.
+        live?.let { old -> if (old !== this) old.shutdownBubble() }
+        if (::bubble.isInitialized) detach()
+        live = this
+        // Positions saved by test build 0.1 could keep the bubble off the button; clear them once.
+        val prefs = Prefs.get(this)
+        if (prefs.getInt("layout_version", 1) < 2) {
+            Prefs.clearAllPositions(this)
+            prefs.edit().putInt("layout_version", 2).apply()
+        }
         dictation = Dictation(this, this)
         bubble = BubbleView(this)
         params = WindowManager.LayoutParams(
@@ -80,7 +89,20 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         updateNotification()
     }
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        shutdownBubble()
+        return super.onUnbind(intent)
+    }
+
+    private fun shutdownBubble() {
+        handler.removeCallbacksAndMessages(null)
+        if (::dictation.isInitialized && dictation.active) dictation.cancel()
+        unmute()
+        if (::bubble.isInitialized) detach()
+    }
+
     override fun onDestroy() {
+        if (live === this) live = null
         Prefs.get(this).unregisterOnSharedPreferenceChangeListener(this)
         if (::dictation.isInitialized) dictation.release()
         unmute()
@@ -141,13 +163,18 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         if (show) {
             attach()
             reposition()
+            handler.removeCallbacks(watchdog)
+            handler.postDelayed(watchdog, 600)
         } else {
             detach()
         }
     }
 
     private fun attach() {
-        if (attached) return
+        if (attached || bubble.isAttachedToWindow) {
+            attached = true
+            return
+        }
         try {
             wm.addView(bubble, params)
             attached = true
@@ -160,6 +187,10 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         try {
             wm.removeView(bubble)
         } catch (_: Exception) {
+            try {
+                wm.removeViewImmediate(bubble)
+            } catch (_: Exception) {
+            }
         }
         attached = false
     }
@@ -198,8 +229,17 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
                     setMode(BubbleView.Mode.IDLE)
                 }
             }
-        }, 250)
+        }, 120)
     }
+
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (attached && !dragging) reposition()
+            if (attached) handler.postDelayed(this, 600)
+        }
+    }
+
+    private var dragging = false
 
     private fun reposition() {
         if (!attached) return
@@ -208,13 +248,10 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         val (sw, sh) = screenSize()
 
         val manual = Prefs.manualPos(this, pkg)
-        val target = if (manual == null && Prefs.snap(this)) findButton() else null
+        val target = if (manual == null && Prefs.snap(this)) targetCentre() else null
         val (x, y) = when {
             manual != null -> manual
-            target != null -> {
-                val r = Rect().also { target.getBoundsInScreen(it) }
-                (r.centerX() - size / 2) to (r.centerY() - size / 2)
-            }
+            target != null -> (target.first - size / 2) to (target.second - size / 2)
             // Fallback: bottom right, roughly where chat apps put their mic.
             else -> (sw - size - dp(12f).toInt()) to (sh - size - dp(110f).toInt())
         }
@@ -232,37 +269,53 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
 
     // ---- finding things inside the other app --------------------------------------------
 
-    private val buttonIdHints = listOf("voice_note_btn", "voice_note", "mic", "send", "voice", "speech", "record")
+    private val exactIds = setOf("voice_note_btn", "send", "send_button", "send_btn", "mic_button", "voice_input_button")
+    private val buttonIdHints = listOf("voice_note_btn", "mic", "send", "voice_input", "speech", "record_button")
     private val buttonDescHints = Regex("voice|mic|record|send|dictat|speak|listen", RegexOption.IGNORE_CASE)
+    private val excludeDesc = Regex("play|pause|seek|duration|transcri|message from|voice message,", RegexOption.IGNORE_CASE)
 
-    /** The app's own mic or send button near the bottom of the screen, to sit on top of. */
+    /** The app's own mic or send button beside the message box, to sit on top of. */
     private fun findButton(): AccessibilityNodeInfo? {
         val root = rootInActiveWindow ?: return null
         val (_, sh) = screenSize()
         val maxSide = dp(140f)
+        val fieldRect = findField()?.let { f -> Rect().also { f.getBoundsInScreen(it) } }
+        val rowSlack = dp(60f)
         var best: AccessibilityNodeInfo? = null
         var bestScore = Int.MIN_VALUE
         val r = Rect()
         walk(root) { n ->
-            if (!n.isVisibleToUser) return@walk
+            if (!n.isVisibleToUser || n.isEditable) return@walk
             val id = n.viewIdResourceName?.substringAfter(":id/")?.lowercase() ?: ""
             val desc = n.contentDescription?.toString() ?: ""
-            val idHit = buttonIdHints.any { id.contains(it) }
-            val descHit = buttonDescHints.containsMatchIn(desc)
+            val exact = id in exactIds
+            val idHit = exact || buttonIdHints.any { id.contains(it) }
+            val descHit = buttonDescHints.containsMatchIn(desc) && !excludeDesc.containsMatchIn(desc)
             if (!idHit && !descHit) return@walk
-            if (n.isEditable) return@walk
             n.getBoundsInScreen(r)
             if (r.width() <= 0 || r.height() <= 0 || r.width() > maxSide || r.height() > maxSide) return@walk
-            if (r.centerY() < sh * 0.35f) return@walk // ignore top toolbars, e.g. Gmail's Send
-            var score = r.bottom + r.right / 4
+            if (fieldRect != null) {
+                // Must be on the same row as the message box (not in the chat above it).
+                if (r.centerY() < fieldRect.top - rowSlack || r.centerY() > fieldRect.bottom + rowSlack) return@walk
+            } else if (!exact || r.centerY() < sh * 0.35f) {
+                return@walk
+            }
+            var score = r.right
             if (idHit) score += 5000
-            if (id == "voice_note_btn" || id == "send") score += 5000 // WhatsApp's own button
+            if (exact) score += 10000
             if (score > bestScore) {
                 bestScore = score
                 best = n
             }
         }
         return best
+    }
+
+    /** Centre of the button the bubble should sit on, if there is one. */
+    private fun targetCentre(): Pair<Int, Int>? {
+        val n = findButton() ?: return null
+        val r = Rect().also { n.getBoundsInScreen(it) }
+        return r.centerX() to r.centerY()
     }
 
     private fun findSendButton(): AccessibilityNodeInfo? {
@@ -317,10 +370,20 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
         }
     }
 
+    private val placeholders = setOf(
+        "message", "type a message", "text message", "rcs message", "sms message",
+        "enter text", "compose email", "search", "",
+    )
+
     private fun fieldText(n: AccessibilityNodeInfo?): String {
         if (n == null) return ""
         if (Build.VERSION.SDK_INT >= 26 && n.isShowingHintText) return ""
-        return n.text?.toString() ?: ""
+        val t = n.text?.toString() ?: return ""
+        if (Build.VERSION.SDK_INT >= 26 && n.hintText != null && t == n.hintText.toString()) return ""
+        // WhatsApp reports its grey "Message" placeholder as text. If the box only holds a
+        // typical placeholder and the app shows its mic (not Send), the box is really empty.
+        if (t.trim().lowercase() in placeholders && findSendButton() == null) return ""
+        return t
     }
 
     private fun currentFieldText(): String = fieldText(findField())
@@ -558,6 +621,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
                     val dy = e.rawY - downY
                     if (!dragging && !longPressed && hypot(dx, dy) > slop) {
                         dragging = true
+                        this@BubbleService.dragging = true
                         handler.removeCallbacks(longPress)
                     }
                     if (dragging) {
@@ -583,14 +647,26 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
                             detach()
                             params.x = startX; params.y = startY
                             toast("Bubble hidden. Leave and reopen the app to bring it back.")
-                        } else if (pkg != null && (abs(params.x - startX) > 0 || abs(params.y - startY) > 0)) {
-                            Prefs.setManualPos(this@BubbleService, pkg, params.x, params.y)
+                        } else if (pkg != null) {
+                            val size = sizePx()
+                            val t = if (Prefs.snap(this@BubbleService)) targetCentre() else null
+                            val cx = params.x + size / 2
+                            val cy = params.y + size / 2
+                            if (t != null && hypot((cx - t.first).toFloat(), (cy - t.second).toFloat()) < dp(110f)) {
+                                // Dropped near the app's button: snap back on to it.
+                                Prefs.clearManualPos(this@BubbleService, pkg)
+                                reposition()
+                            } else {
+                                Prefs.setManualPos(this@BubbleService, pkg, params.x, params.y)
+                            }
                         }
+                        this@BubbleService.dragging = false
                     } else if (!longPressed) {
                         onTap()
                     }
                 }
                 MotionEvent.ACTION_CANCEL -> {
+                    this@BubbleService.dragging = false
                     handler.removeCallbacks(longPress)
                     bubble.dropTarget = false
                 }
@@ -600,6 +676,7 @@ class BubbleService : AccessibilityService(), Dictation.Listener,
     }
 
     companion object {
+        private var live: BubbleService? = null
         private const val CHANNEL = "bubble_state"
         private const val NOTIF_ID = 7
 
